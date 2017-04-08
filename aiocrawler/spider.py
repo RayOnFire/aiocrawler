@@ -15,7 +15,12 @@ try:
     import asyncio_redis
 except ImportError:
     print('Asyncio Redis is not installed. Try pip install asyncio_redis')
-
+'''
+try:
+    import aioodbc
+except ImportError:
+    print('aioodbc is required for SQLiteSpider, try install it with pip install aioodbc')
+'''
 COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393',
 }
@@ -229,12 +234,22 @@ class SQLiteSpider(BaseSpider):
     def __init__(self, loop=None, sem=10, config=None, db='log.db'):
         super().__init__(loop, sem, config)
         self.db_name = db
+        self.conn = sqlite3.connect(db)
+        self._init_db()
 
-if __name__ == '__main__':
-    def handler(response, options):
-        print(response)
-    s = Spider()
-    s.register_callback('h1', 'text', handler)
-    s.add_url('http://www.baidu.com', 'h1')
-    s.run()
-    print(s.handlers)
+    def _init_db(self):
+        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_url ("
+                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                             "time TEXT,"
+                             "url TEXT NOT NULL,"
+                             "handler_name TEXT NOT NULL,"
+                             "status INTEGER NOT NULL)"
+        ))
+
+    async def handle_response(self, response, url, headers, handler_name, options):
+        self.conn.execute("INSERT INTO logger_url VALUES (?, ?, ?, ?, ?)", (None, self._get_time(), url, handler_name, response.status))
+        self.conn.commit()
+        return await super().handle_response(response, url, headers, handler_name, options)
+
+    def run(self):
+        self.start()
