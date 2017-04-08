@@ -1,6 +1,5 @@
 import asyncio
 import aiohttp
-import asyncio_redis
 import logging
 import time
 import concurrent.futures
@@ -12,12 +11,13 @@ import sqlite3
 from copy import deepcopy
 from pprint import pprint
 
+try:
+    import asyncio_redis
+except ImportError:
+    print('Asyncio Redis is not installed. Try pip install asyncio_redis')
+
 COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393',
-}
-
-config = {
-    'enable_redis': True,
 }
 
 def get_host(url):
@@ -29,7 +29,7 @@ def get_host(url):
 
 class BaseSpider(object):
 
-    def __init__(self, loop=None, sem=10, config=config):
+    def __init__(self, loop=None, sem=10, config=None):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -38,6 +38,7 @@ class BaseSpider(object):
         self.url_queue_manager = mp.Manager()
         self.url_queue_map = {}
         self.url_queue_for_mp = self.url_queue_manager.Queue()
+        self.config = config
 
     def _get_time(self):
         return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -82,39 +83,37 @@ class BaseSpider(object):
         o.update({'url': url})
         while True:
             headers = self._get_headers(get_host(url))
-            async with self.session.request('GET', url, headers=headers, proxy='http://127.0.0.1:1080') as response:
-                if config['enable_redis']:
-                    await self.log('logger_url', json.dumps({'date': self._get_time(), 'url': url, 'handler': handler_name, 'status': response.status}))
-                if response.status == 200:
-                    if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
-                        print('set cookie:', response.headers['Set-Cookie'])
-                        headers.update({'Cookie': response.headers['Set-Cookie']})
-                    if not handler_name in self.handlers:
-                        # TODO: handler not exist, raise error
-                        break
-                    if 'run_in_process' in self.handlers[handler_name]:
-                        if self.handlers[handler_name]['type'] == 'text':
-                            self.url_queue_map[handler_name].put({'response': await response.text(), 'options': o})
-                        elif self.handlers[handler_name]['type'] == 'binary':
-                            self.url_queue_map[handler_name].put({'response': await response.read(), 'options': o})
-                    else:
-                        if self.handlers[handler_name]['type'] == 'binary':
-                            self.handlers[handler_name]['callback'](await response.read(), self, o)
-                        elif self.handlers[handler_name]['type'] == 'text':
-                            self.handlers[handler_name]['callback'](await response.text(), self, o)
+            async with self.session.request('GET', url, headers=headers, proxy=self.config.get('proxy', None)) as response:
+                if await self.handle_response(response, url, headers, handler_name, o):
                     break
-                elif response.status == 400:
-                    if not await self.handle_400(o):
-                        break
-                elif response.status == 404:
-                    if not await self.handle_404(o):
-                        break
-                elif response.status == 500:
-                    if not await self.handle_500(o):
-                        break
-                else:
-                    if not await self.handle_others(o):
-                        break
+
+    async def handle_response(self, response, url, headers, handler_name, options):
+        if response.status == 200:
+            if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
+                print('set cookie:', response.headers['Set-Cookie'])
+                headers.update({'Cookie': response.headers['Set-Cookie']})
+            if not handler_name in self.handlers:
+                # TODO: handler not exist, raise error
+                return True
+            if 'run_in_process' in self.handlers[handler_name]:
+                if self.handlers[handler_name]['type'] == 'text':
+                    self.url_queue_map[handler_name].put({'response': await response.text(), 'options': options})
+                elif self.handlers[handler_name]['type'] == 'binary':
+                    self.url_queue_map[handler_name].put({'response': await response.read(), 'options': options})
+            else:
+                if self.handlers[handler_name]['type'] == 'binary':
+                    self.handlers[handler_name]['callback'](await response.read(), self, options)
+                elif self.handlers[handler_name]['type'] == 'text':
+                    self.handlers[handler_name]['callback'](await response.text(), self, options)
+            return True
+        elif response.status == 400:
+            return not await self.handle_400(options)
+        elif response.status == 404:
+            return not await self.handle_404(options)
+        elif response.status == 500:
+            return not await self.handle_500(options)
+        else:
+            return not await self.handle_others(options)
 
     async def handle_others(self, info):
         return False
@@ -161,10 +160,9 @@ class BaseSpider(object):
             asyncio.ensure_future(self.check_queue())
             loop.run_until_complete(f)
 
-
 class RedisSpider(BaseSpider):
 
-    def __init__(self, loop=None, sem=10, config=config):
+    def __init__(self, loop=None, sem=10, config=None):
         super().__init__(loop, sem, config)
         self.retry_threshold = 10
         self.status_500_count_lock = asyncio.Lock()
@@ -184,24 +182,20 @@ class RedisSpider(BaseSpider):
         pass
 
     async def handle_others(self, info):
-        if config['enable_redis']:
-            await self.log('logger_other_status', json.dumps(info))
+        await self.log('logger_other_status', json.dumps(info))
         return False
 
     async def handle_404(self, info):
-        if config['enable_redis']:
-            await self.log('logger_404', json.dumps(info))
+        await self.log('logger_404', json.dumps(info))
         return False
 
     async def handle_400(self, info):
-        if config['enable_redis']:
-            await self.log('logger_400', json.dumps(info))
+        await self.log('logger_400', json.dumps(info))
         return False
 
     async def handle_500(self, info):
         # TODO: add threshold for stop asyncio
-        if config['enable_redis']:
-            await self.log('logger_500', json.dumps(info))
+        await self.log('logger_500', json.dumps(info))
         return True
 
     async def log(self, logger_name, data):
@@ -214,6 +208,10 @@ class RedisSpider(BaseSpider):
             await asyncio.sleep(1)
             if self.is_end:
                 future.set_result('Done!')
+
+    async def handle_response(self, response, url, headers, handler_name, options):
+        await self.log('logger_url', json.dumps({'date': self._get_time(), 'url': url, 'handler': handler_name, 'status': response.status}))
+        return await super().handle_response(response, url, headers, handler_name, options)
 
     def stop(self):
         self.is_end = True
@@ -228,7 +226,7 @@ class RedisSpider(BaseSpider):
 
 class SQLiteSpider(BaseSpider):
 
-    def __init__(self, loop=None, sem=10, config=config, db='log.db'):
+    def __init__(self, loop=None, sem=10, config=None, db='log.db'):
         super().__init__(loop, sem, config)
         self.db_name = db
 

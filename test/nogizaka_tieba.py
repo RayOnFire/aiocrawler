@@ -1,5 +1,5 @@
-from spider import RedisSpider
-from helpers import follow_pattern
+from aiocrawler.spider import RedisSpider
+from aiocrawler.helpers import follow_pattern
 from bs4 import BeautifulSoup
 import os
 
@@ -42,10 +42,10 @@ def parse_img(item, queue, url_queue):
 		f.write(item['response'])
 
 if __name__ == '__main__':
-	baidu_spider = RedisSpider()
+	baidu_spider = RedisSpider(config={'proxy': 'http://127.0.0.1:1080'})
 	baidu_spider.register_callback('parse_tab_good', 'text', parse_tab_good, True)
 	baidu_spider.register_callback('parse_thread', 'text', parse_thread, True)
 	baidu_spider.register_callback('parse_img', 'binary', parse_img, True)
-	for i in range(15, 15):
+	for i in range(0, 1):
 		baidu_spider.add_url('http://tieba.baidu.com/f?kw=%E4%B9%83%E6%9C%A8%E5%9D%8246&ie=utf-8&tab=good&cid=&pn=' + str(i * 50), 'parse_tab_good')
 	baidu_spider.run()
