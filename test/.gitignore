@@ -1,2 +1,4 @@
 sqlite3.exe
 __pycache__/
+img2/
+log.db

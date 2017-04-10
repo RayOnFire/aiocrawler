@@ -15,12 +15,7 @@ try:
     import asyncio_redis
 except ImportError:
     print('Asyncio Redis is not installed. Try pip install asyncio_redis')
-'''
-try:
-    import aioodbc
-except ImportError:
-    print('aioodbc is required for SQLiteSpider, try install it with pip install aioodbc')
-'''
+
 COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393',
 }
@@ -34,7 +29,7 @@ def get_host(url):
 
 class BaseSpider(object):
 
-    def __init__(self, loop=None, sem=10, config=None):
+    def __init__(self, loop=None, sem=10, config=None, db_name='log.db'):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -44,6 +39,41 @@ class BaseSpider(object):
         self.url_queue_map = {}
         self.url_queue_for_mp = self.url_queue_manager.Queue()
         self.config = config
+        self.db_name = db_name
+        self.urls = {} # use to store crawled url and date
+        self.conn = sqlite3.connect(db_name)
+        self.cur = self.conn.cursor()
+        self.status_handler = {
+            400: self.handle_400,
+            404: self.handle_404,
+            500: self.handle_500,
+            'others': self.handle_others,
+        }
+        self._init_db()
+        self._init_url()
+
+    def _init_url(self):
+        try:
+            self.cur.execute("SELECT DISTINCT url FROM logger_fetch")
+            urls = self.cur.fetchall()
+            for url in urls:
+                self.urls[url] = None
+        except sqlite3.OperationalError:
+            pass
+
+    def _init_db(self):
+        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_fetch ("
+                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                             "date TEXT,"
+                             "url TEXT NOT NULL,"
+                             "handler_name TEXT NOT NULL,"
+                             "status INTEGER NOT NULL)"))
+        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_info ("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "date TEXT,"
+                            "type TEXT NOT NULL,"
+                            "message TEXT)"))
+        self.conn.commit()
 
     def _get_time(self):
         return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -70,7 +100,7 @@ class BaseSpider(object):
 
     async def check_queue(self):
         while True:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
             if not self.url_queue_for_mp.empty():
                 while True:
                     try:
@@ -80,6 +110,14 @@ class BaseSpider(object):
                         break
 
     async def bound_fetch(self, url, handler_name, options, proxy=None):
+        # TODO: Cause race condition here?
+        if url in self.urls:
+            self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'DUPLICATE_URL', url))
+            self.conn.commit()
+            return
+        else:
+            # avoid other corotinue fetch same url
+            self.urls[url] = None
         async with self.sem:
             await self.fetch(url, handler_name, options, proxy)
 
@@ -92,33 +130,45 @@ class BaseSpider(object):
                 if await self.handle_response(response, url, headers, handler_name, o):
                     break
 
+    async def refetch(self, url, handler_name, options, proxy=None):
+        del self.urls[url]
+        await self.bound_fetch(url, handler_name, options, proxy)
+
     async def handle_response(self, response, url, headers, handler_name, options):
+        self.conn.execute("INSERT INTO logger_fetch VALUES (?, ?, ?, ?, ?)", (None, self._get_time(), url, handler_name, response.status))
+        self.conn.commit()
         if response.status == 200:
+            self.urls[url] = self._get_time()  # For future use to set url expire time
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
                 print('set cookie:', response.headers['Set-Cookie'])
                 headers.update({'Cookie': response.headers['Set-Cookie']})
             if not handler_name in self.handlers:
                 # TODO: handler not exist, raise error
                 return True
-            if 'run_in_process' in self.handlers[handler_name]:
-                if self.handlers[handler_name]['type'] == 'text':
-                    self.url_queue_map[handler_name].put({'response': await response.text(), 'options': options})
-                elif self.handlers[handler_name]['type'] == 'binary':
-                    self.url_queue_map[handler_name].put({'response': await response.read(), 'options': options})
-            else:
-                if self.handlers[handler_name]['type'] == 'binary':
-                    self.handlers[handler_name]['callback'](await response.read(), self, options)
-                elif self.handlers[handler_name]['type'] == 'text':
-                    self.handlers[handler_name]['callback'](await response.text(), self, options)
+            try:
+                if 'run_in_process' in self.handlers[handler_name]:
+                    if self.handlers[handler_name]['type'] == 'text':
+                        text = await response.text()
+                        self.url_queue_map[handler_name].put({'response': text, 'options': options})
+                    elif self.handlers[handler_name]['type'] == 'binary':
+                        binary = await response.read()
+                        self.url_queue_map[handler_name].put({'response': binary, 'options': options})
+                else:
+                    if self.handlers[handler_name]['type'] == 'binary':
+                        binary = await response.binary()
+                        self.handlers[handler_name]['callback'](binary, self, options)
+                    elif self.handlers[handler_name]['type'] == 'text':
+                        text = await response.text()
+                        self.handlers[handler_name]['callback'](text, self, options)
+            except aiohttp.client_exceptions.ClientPayloadError:
+                self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'CLIENTPAYLOADERROR', url))
+                asyncio.ensure_future(self.refetch(url, handler_name, options))
             return True
-        elif response.status == 400:
-            return not await self.handle_400(options)
-        elif response.status == 404:
-            return not await self.handle_404(options)
-        elif response.status == 500:
-            return not await self.handle_500(options)
         else:
-            return not await self.handle_others(options)
+            if response.status in self.status_handler:
+                return not await self.status_handler[response.status](options)
+            else:
+                return not await self.status_handler['others'](options)
 
     async def handle_others(self, info):
         return False
@@ -148,6 +198,7 @@ class BaseSpider(object):
         self.is_end = True
 
     def start(self):
+        self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'SPIDER_START', None))
         seprate_handlers = []
         loop = asyncio.get_event_loop()
 
@@ -164,6 +215,9 @@ class BaseSpider(object):
             asyncio.ensure_future(self.check_end(f))
             asyncio.ensure_future(self.check_queue())
             loop.run_until_complete(f)
+
+    def run(self):
+        self.start()
 
 class RedisSpider(BaseSpider):
 
@@ -227,29 +281,4 @@ class RedisSpider(BaseSpider):
             'handlers': [{'name': v['name'], 'type': v['type']} for (k, v) in self.handlers.items()]
         }
         asyncio.ensure_future(self.log('logger_status', json.dumps(msg)))
-        self.start()
-
-class SQLiteSpider(BaseSpider):
-
-    def __init__(self, loop=None, sem=10, config=None, db='log.db'):
-        super().__init__(loop, sem, config)
-        self.db_name = db
-        self.conn = sqlite3.connect(db)
-        self._init_db()
-
-    def _init_db(self):
-        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_url ("
-                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                             "time TEXT,"
-                             "url TEXT NOT NULL,"
-                             "handler_name TEXT NOT NULL,"
-                             "status INTEGER NOT NULL)"
-        ))
-
-    async def handle_response(self, response, url, headers, handler_name, options):
-        self.conn.execute("INSERT INTO logger_url VALUES (?, ?, ?, ?, ?)", (None, self._get_time(), url, handler_name, response.status))
-        self.conn.commit()
-        return await super().handle_response(response, url, headers, handler_name, options)
-
-    def run(self):
         self.start()
