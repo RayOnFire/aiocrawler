@@ -29,7 +29,7 @@ def get_host(url):
 
 class BaseSpider(object):
 
-    def __init__(self, loop=None, sem=10, config=None, db_name='log.db', headers=None):
+    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -80,7 +80,7 @@ class BaseSpider(object):
     def _get_time(self):
         return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    def register_callback(self, name, response_type, callback, run_in_process=False, options=None):
+    def register_callback(self, name, response_type, callback, run_in_process=False, options=None, no_wrapper=False):
         if name in self.handlers:
             # TODO: raise error here
             print('handler name should be unique')
@@ -89,6 +89,8 @@ class BaseSpider(object):
             self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback, 'run_in_process': True}
         else:
             self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback}
+        if no_wrapper:
+            self.handlers[name].update({'no_wrapper': True})
 
     def _get_headers(self, hostname):
         if hasattr(self, 'headers'):
@@ -149,9 +151,10 @@ class BaseSpider(object):
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
                 print('set cookie:', response.headers['Set-Cookie'])
                 headers.update({'Cookie': response.headers['Set-Cookie']})
-            if not handler_name in self.handlers or handler_name != None:
-                # TODO: handler not exist, raise error
-                return True
+            if not handler_name in self.handlers:
+                if handler_name != None:
+                    # TODO: handler not exist, raise error
+                    return True
             try:
                 if 'run_in_process' in self.handlers[handler_name]:
                     if self.handlers[handler_name]['type'] == 'text':
@@ -216,7 +219,10 @@ class BaseSpider(object):
         if len(seprate_handlers) > 0:
             with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers)) as executor:
                 for h in seprate_handlers:
-                    loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
+                    if 'no_wrapper' in h:
+                        loop.run_in_executor(executor, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
+                    else:
+                        loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
 
                 # Check flag and keep event loop
                 f = asyncio.Future()
