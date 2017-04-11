@@ -37,7 +37,7 @@ class BaseSpider(object):
         self.session = aiohttp.ClientSession()
         self.url_queue_manager = mp.Manager()
         self.url_queue_map = {}
-        self.url_queue_for_mp = self.url_queue_manager.Queue()
+        self.url_queue_for_mp = self.url_queue_manager.Queue(maxsize=500)
         self.config = config
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
@@ -232,6 +232,7 @@ class BaseSpider(object):
         else:
             f = asyncio.Future()
             asyncio.ensure_future(self.check_end(f))
+            asyncio.ensure_future(self.check_queue())
             loop.run_until_complete(f)
 
     def run(self):

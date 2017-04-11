@@ -1,5 +1,6 @@
 from aiocrawler.spider import BaseSpider
 import sqlite3
+import multiprocessing as mp
 
 h_pixiv = {
     'App-OS': 'ios',
@@ -27,12 +28,21 @@ def add_to_database(queue, url_queue):
 			pass
 		conn.commit()
 
+def url_adder(url_queue):
+	for i in range(100000, 1000000):
+		o = {
+			'url': 'https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i),
+			'handler': 'add_to_database',
+			'options': {},
+		}
+		url_queue.put(o)
+
 #config={'proxy': 'http://127.0.0.1:1080'}
 
 if __name__ == '__main__':
 	init_db()
-	pixiv_spider = BaseSpider(headers=h_pixiv, sem=20)
+	pixiv_spider = BaseSpider(headers=h_pixiv, sem=100)
 	pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
-	for i in range(100000):
-		pixiv_spider.add_url('https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i), 'add_to_database')
+	p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp,))
+	p.start()
 	pixiv_spider.run()
