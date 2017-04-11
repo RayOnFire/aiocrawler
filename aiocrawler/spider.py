@@ -29,7 +29,7 @@ def get_host(url):
 
 class BaseSpider(object):
 
-    def __init__(self, loop=None, sem=10, config=None, db_name='log.db'):
+    def __init__(self, loop=None, sem=10, config=None, db_name='log.db', headers=None):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -51,6 +51,8 @@ class BaseSpider(object):
         }
         self._init_db()
         self._init_url()
+        if headers:
+            self.headers = headers
 
     def _init_url(self):
         try:
@@ -66,7 +68,7 @@ class BaseSpider(object):
                              "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                              "date TEXT,"
                              "url TEXT NOT NULL,"
-                             "handler_name TEXT NOT NULL,"
+                             "handler_name TEXT,"
                              "status INTEGER NOT NULL)"))
         self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_info ("
                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -89,13 +91,15 @@ class BaseSpider(object):
             self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback}
 
     def _get_headers(self, hostname):
+        if hasattr(self, 'headers'):
+            return self.headers
         if hostname in self.headers_host:
             return self.headers_host[hostname]
         else:
             self.headers_host[hostname] = deepcopy(COMMON_HEADERS)
             return self.headers_host[hostname]
 
-    def add_url(self, url, callback, options={}):
+    def add_url(self, url, callback=None, options={}):
         asyncio.ensure_future(self.bound_fetch(url, callback, options))
 
     async def check_queue(self):
@@ -126,9 +130,12 @@ class BaseSpider(object):
         o.update({'url': url})
         while True:
             headers = self._get_headers(get_host(url))
-            async with self.session.request('GET', url, headers=headers, proxy=self.config.get('proxy', None)) as response:
+            try:
+                response = await self.session.request('GET', url, headers=headers, proxy=self.config.get('proxy', None))
                 if await self.handle_response(response, url, headers, handler_name, o):
                     break
+            except aiohttp.client_exceptions.ServerDisconnectedError:
+                asyncio.ensure_future(self.refetch(url, handler_name, options))
 
     async def refetch(self, url, handler_name, options, proxy=None):
         del self.urls[url]
@@ -142,7 +149,7 @@ class BaseSpider(object):
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
                 print('set cookie:', response.headers['Set-Cookie'])
                 headers.update({'Cookie': response.headers['Set-Cookie']})
-            if not handler_name in self.handlers:
+            if not handler_name in self.handlers or handler_name != None:
                 # TODO: handler not exist, raise error
                 return True
             try:
@@ -206,14 +213,19 @@ class BaseSpider(object):
             if 'run_in_process' in v:
                 seprate_handlers.append(v)
                 self.url_queue_map[k] = self.url_queue_manager.Queue()
-        with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers)) as executor:
-            for h in seprate_handlers:
-                loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
+        if len(seprate_handlers) > 0:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers)) as executor:
+                for h in seprate_handlers:
+                    loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
 
-            # Check flag and keep event loop
+                # Check flag and keep event loop
+                f = asyncio.Future()
+                asyncio.ensure_future(self.check_end(f))
+                asyncio.ensure_future(self.check_queue())
+                loop.run_until_complete(f)
+        else:
             f = asyncio.Future()
             asyncio.ensure_future(self.check_end(f))
-            asyncio.ensure_future(self.check_queue())
             loop.run_until_complete(f)
 
     def run(self):
