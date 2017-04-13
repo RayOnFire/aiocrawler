@@ -9,6 +9,8 @@ import datetime
 import json
 import sqlite3
 import time
+import signal
+import os
 from copy import deepcopy
 from pprint import pprint
 
@@ -29,6 +31,19 @@ def get_host(url):
     return u.split('/')[0]
 
 class BaseSpider(object):
+    """ The generic spider with basic function
+
+    This class have the basic function for crawling web.
+    (1) Logging: This class logged with sqlite3 database, and create two tables named `logger_info` and `logger_fetch`.
+                 The first one is for storing spider metadata e.g. start of spider, exception in processing.
+                 The last one is for storing crawled urls, which can be useful for starting from previous point of process.
+    (2) Multiprocessing: As known to us, Python employed GIL for simplify multithreading, so in order to run spider on a
+                         multicore system more effetively,we need multiprocessing. The basic idea is let event loop run in
+                         main process, and let response handlers run in seperate process to avoid blocking event loop.
+                         And queue was used to communicate between processes. In order to inform child process the exit of
+                         main process, main process send SIGINT signal to every child process, which can be useful for child
+                         processes to do some clean up job.
+    """
 
     def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
         self.handlers = {}
@@ -39,11 +54,13 @@ class BaseSpider(object):
         self.url_queue_manager = mp.Manager()
         self.url_queue_map = {}
         self.url_queue_for_mp = self.url_queue_manager.Queue(50)
+        self.log_queue = self.url_queue_manager.Queue()
         self.config = config
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
         self.conn = sqlite3.connect(db_name)
         self.cur = self.conn.cursor()
+        self.url_in_loop = 0
         self.status_handler = {
             400: self.handle_400,
             404: self.handle_404,
@@ -97,7 +114,13 @@ class BaseSpider(object):
             self.headers_host[hostname] = deepcopy(COMMON_HEADERS)
             return self.headers_host[hostname]
 
+    async def log_interval(self):
+        while True:
+            await asyncio.sleep(5)
+            print('Current url in loop:', self.url_in_loop)
+
     def add_url(self, url, callback=None, options={}):
+        self.url_in_loop += 1
         task = asyncio.ensure_future(self.bound_fetch(url, callback, options))
         #print(task)
 
@@ -106,8 +129,10 @@ class BaseSpider(object):
             await asyncio.sleep(0.1)
             if not self.url_queue_for_mp.empty():
                 while True:
+                    if self.url_in_loop > 100:
+                        break
                     try:
-                        item = self.url_queue_for_mp.get_nowait()
+                        item = self.url_queue_for_mp.get_nowait() # use get_nowait to avoid block event loop
                         self.add_url(item['url'], item['handler'], item['options'])
                     except queue.Empty:
                         break
@@ -115,7 +140,7 @@ class BaseSpider(object):
     async def bound_fetch(self, url, handler_name, options, proxy=None):
         # TODO: Cause race condition here?
         if url in self.urls:
-            self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'DUPLICATE_URL', url))
+            self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'DUPLICATE_URL', url)})
             #self.conn.commit()
             return
         else:
@@ -135,7 +160,7 @@ class BaseSpider(object):
                     break
             except aiohttp.client_exceptions.ServerDisconnectedError:
                 #asyncio.ensure_future(self.refetch(url, handler_name, options))
-                self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'SERVER_DISCONNECT_EXCEPTION', url))
+                self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'SERVER_DISCONNECT_EXCEPTION', url)})
                 #self.conn.commit()
 
     async def refetch(self, url, handler_name, options, proxy=None):
@@ -143,8 +168,8 @@ class BaseSpider(object):
         await self.bound_fetch(url, handler_name, options, proxy)
 
     async def handle_response(self, response, url, headers, handler_name, options):
-        self.conn.execute("INSERT INTO logger_fetch VALUES (?, ?, ?, ?, ?)", (None, self._get_time(), url, handler_name, response.status))
-        #self.conn.commit()
+        self.url_in_loop -= 1
+        self.log_queue.put_nowait({'table': 'logger_fetch', 'args': 5, 'data': (None, self._get_time(), url, handler_name, response.status)})
         if response.status == 200:
             self.urls[url] = self._get_time()  # For future use to set url expire time
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
@@ -169,7 +194,7 @@ class BaseSpider(object):
                         text = await response.text()
                         self.handlers[handler_name]['callback'](text, self, options)
             except aiohttp.client_exceptions.ClientPayloadError:
-                self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'CLIENTPAYLOADERROR', url))
+                self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'CLIENTPAYLOADERROR', url)})
                 asyncio.ensure_future(self.refetch(url, handler_name, options))
             return True
         else:
@@ -202,11 +227,20 @@ class BaseSpider(object):
             item = item_queue.get()
             handler(item, item_queue, url_queue)
 
+    @staticmethod
+    def logger_process(conn, log_queue):
+        conn = sqlite3.connect('log.db')
+        while True:
+            log = log_queue.get()
+            sql = 'INSERT INTO ' + log['table'] + ' VALUES (' + ('?, ' * log['args'])[:-2] + ')'
+            conn.execute(sql, log['data'])
+            conn.commit() # TODO: use timer signal to commit?
+
     def stop(self):
         self.is_end = True
 
     def start(self):
-        self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'SPIDER_START', None))
+        self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'SPIDER_START', None)})
         seprate_handlers = []
         loop = asyncio.get_event_loop()
 
@@ -215,7 +249,8 @@ class BaseSpider(object):
                 seprate_handlers.append(v)
                 self.url_queue_map[k] = self.url_queue_manager.Queue()
         if len(seprate_handlers) > 0:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers)) as executor:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers) + 1) as executor:
+                loop.run_in_executor(executor, self.logger_process, self.conn, self.log_queue)
                 for h in seprate_handlers:
                     if h['no_wrapper']:
                         loop.run_in_executor(executor, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
@@ -226,24 +261,19 @@ class BaseSpider(object):
                 f = asyncio.Future()
                 asyncio.ensure_future(self.check_end(f))
                 asyncio.ensure_future(self.check_queue())
+                asyncio.ensure_future(self.log_interval())
                 try:
                     loop.run_until_complete(f)
-                except KeyboardInterrupt as e:
+                except Exception as e:
+                    # retrieve tasks to avoid exception show in console
+                    #print(e.message)
                     tasks = asyncio.Task.all_tasks()
-                    for task in tasks:
-                        pass
+                    # close db connection
                     self.conn.commit()
-                    #for (k, v) in self.url_queue_map.items():
-                    #    v.put('TERMINATE')
-                    print(mp.active_children())
+                    #self.conn.close()
+                    # use SIGINT to inform child process to exit.
                     for p in mp.active_children():
-                        p.terminate()
-                    while True:
-                        time.sleep(0.5)
-                        #for (k, v) in self.url_queue_map.items():
-                        #    print(v.qsize())
-                        #print(self.url_queue_for_mp)
-                        print(mp.active_children())
+                        os.kill(p.pid, signal.SIGINT)
 
         else:
             f = asyncio.Future()

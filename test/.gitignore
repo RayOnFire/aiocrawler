@@ -4,3 +4,4 @@ img2/
 log.db
 mp_test.py
 pixiv.db
+.gitignore

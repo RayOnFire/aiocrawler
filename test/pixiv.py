@@ -2,6 +2,7 @@ from aiocrawler.spider import BaseSpider
 import sqlite3
 import multiprocessing as mp
 import signal
+import os
 
 h_pixiv = {
     'App-OS': 'ios',
@@ -11,7 +12,7 @@ h_pixiv = {
 }
 
 def init_db():
-	conn = sqlite3.connect('F:\\db\\pixiv.db')
+	conn = sqlite3.connect('pixiv.db')
 	conn.execute(("CREATE TABLE IF NOT EXISTS pixiv ("
 					"id INTEGER PRIMARY KEY AUTOINCREMENT,"
 					"url TEXT NOT NULL UNIQUE,"
@@ -19,34 +20,32 @@ def init_db():
 	conn.commit()
 	conn.close()
 
-def add_to_database(queue, url_queue):
-	def on_terminate():
-		conn.commit()
-		print('committed!')
-	signal.signal(signal.SIGTERM, on_terminate)
-	conn = sqlite3.connect('F:\\db\\pixiv.db')
+def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
+	#def on_terminate(sig, frame):
+	#	conn.commit()
+	#	conn.close()
+	#	print('committed!')
+	#	os.kill(mp.current_process().pid, signal.SIGTERM)
+	#signal.signal(signal.SIGINT, on_terminate)
+	conn = sqlite3.connect('pixiv.db')
 	while True:
 		item = queue.get()
-		#print(item)
-		if item == 'TERMINATE':
+		try:
+			conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
 			conn.commit()
-			print("TERMINATE")
-			return
-		else:
-			try:
-				conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
-			except:
-				pass
+		except:
+			pass
 
 
-def url_adder(url_queue):
+def url_adder(url_queue: mp.Queue) -> None:
 	try:
-		for i in range(0, 10000):
+		for i in range(0, 20000):
 			o = {
 				'url': 'https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i),
 				'handler': 'add_to_database',
 				'options': {},
 			}
+			#print(i)
 			url_queue.put(o, True, None)
 	except KeyboardInterrupt:
 		print('url_adder exit!')
@@ -55,7 +54,7 @@ def url_adder(url_queue):
 
 if __name__ == '__main__':
 	init_db()
-	pixiv_spider = BaseSpider(db_name='F:\\db\\log.db', config={'proxy': 'http://127.0.0.1:1080'}, headers=h_pixiv, sem=20)
+	pixiv_spider = BaseSpider(headers=h_pixiv, sem=20)
 	pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
 	p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp,), name='url_adder')
 	p.start()
