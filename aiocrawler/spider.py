@@ -8,6 +8,7 @@ import multiprocessing as mp
 import datetime
 import json
 import sqlite3
+import time
 from copy import deepcopy
 from pprint import pprint
 
@@ -37,7 +38,7 @@ class BaseSpider(object):
         self.session = aiohttp.ClientSession()
         self.url_queue_manager = mp.Manager()
         self.url_queue_map = {}
-        self.url_queue_for_mp = self.url_queue_manager.Queue(maxsize=500)
+        self.url_queue_for_mp = self.url_queue_manager.Queue(50)
         self.config = config
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
@@ -85,12 +86,7 @@ class BaseSpider(object):
             # TODO: raise error here
             print('handler name should be unique')
             return
-        if run_in_process:
-            self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback, 'run_in_process': True}
-        else:
-            self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback}
-        if no_wrapper:
-            self.handlers[name].update({'no_wrapper': True})
+        self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback, 'run_in_process': run_in_process, 'no_wrapper': no_wrapper}
 
     def _get_headers(self, hostname):
         if hasattr(self, 'headers'):
@@ -102,7 +98,8 @@ class BaseSpider(object):
             return self.headers_host[hostname]
 
     def add_url(self, url, callback=None, options={}):
-        asyncio.ensure_future(self.bound_fetch(url, callback, options))
+        task = asyncio.ensure_future(self.bound_fetch(url, callback, options))
+        #print(task)
 
     async def check_queue(self):
         while True:
@@ -119,7 +116,7 @@ class BaseSpider(object):
         # TODO: Cause race condition here?
         if url in self.urls:
             self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'DUPLICATE_URL', url))
-            self.conn.commit()
+            #self.conn.commit()
             return
         else:
             # avoid other corotinue fetch same url
@@ -137,7 +134,9 @@ class BaseSpider(object):
                 if await self.handle_response(response, url, headers, handler_name, o):
                     break
             except aiohttp.client_exceptions.ServerDisconnectedError:
-                asyncio.ensure_future(self.refetch(url, handler_name, options))
+                #asyncio.ensure_future(self.refetch(url, handler_name, options))
+                self.conn.execute("INSERT INTO logger_info VALUES (?, ?, ?, ?)", (None, self._get_time(), 'SERVER_DISCONNECT_EXCEPTION', url))
+                #self.conn.commit()
 
     async def refetch(self, url, handler_name, options, proxy=None):
         del self.urls[url]
@@ -145,7 +144,7 @@ class BaseSpider(object):
 
     async def handle_response(self, response, url, headers, handler_name, options):
         self.conn.execute("INSERT INTO logger_fetch VALUES (?, ?, ?, ?, ?)", (None, self._get_time(), url, handler_name, response.status))
-        self.conn.commit()
+        #self.conn.commit()
         if response.status == 200:
             self.urls[url] = self._get_time()  # For future use to set url expire time
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
@@ -156,13 +155,12 @@ class BaseSpider(object):
                     # TODO: handler not exist, raise error
                     return True
             try:
-                if 'run_in_process' in self.handlers[handler_name]:
+                if self.handlers[handler_name]['run_in_process']:
                     if self.handlers[handler_name]['type'] == 'text':
-                        text = await response.text()
-                        self.url_queue_map[handler_name].put({'response': text, 'options': options})
+                        item = await response.text()
                     elif self.handlers[handler_name]['type'] == 'binary':
-                        binary = await response.read()
-                        self.url_queue_map[handler_name].put({'response': binary, 'options': options})
+                        item = await response.read()
+                    self.url_queue_map[handler_name].put({'response': item, 'options': options})
                 else:
                     if self.handlers[handler_name]['type'] == 'binary':
                         binary = await response.binary()
@@ -213,13 +211,13 @@ class BaseSpider(object):
         loop = asyncio.get_event_loop()
 
         for k, v in self.handlers.items():
-            if 'run_in_process' in v:
+            if v['run_in_process']:
                 seprate_handlers.append(v)
                 self.url_queue_map[k] = self.url_queue_manager.Queue()
         if len(seprate_handlers) > 0:
             with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers)) as executor:
                 for h in seprate_handlers:
-                    if 'no_wrapper' in h:
+                    if h['no_wrapper']:
                         loop.run_in_executor(executor, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
                     else:
                         loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
@@ -228,12 +226,34 @@ class BaseSpider(object):
                 f = asyncio.Future()
                 asyncio.ensure_future(self.check_end(f))
                 asyncio.ensure_future(self.check_queue())
-                loop.run_until_complete(f)
+                try:
+                    loop.run_until_complete(f)
+                except KeyboardInterrupt as e:
+                    tasks = asyncio.Task.all_tasks()
+                    for task in tasks:
+                        pass
+                    self.conn.commit()
+                    #for (k, v) in self.url_queue_map.items():
+                    #    v.put('TERMINATE')
+                    print(mp.active_children())
+                    for p in mp.active_children():
+                        p.terminate()
+                    while True:
+                        time.sleep(0.5)
+                        #for (k, v) in self.url_queue_map.items():
+                        #    print(v.qsize())
+                        #print(self.url_queue_for_mp)
+                        print(mp.active_children())
+
         else:
             f = asyncio.Future()
             asyncio.ensure_future(self.check_end(f))
             asyncio.ensure_future(self.check_queue())
-            loop.run_until_complete(f)
+            try:
+                loop.run_until_complete(f)
+            except KeyboardInterrupt:
+                self.conn.commit()
+                raise KeyboardInterrupt
 
     def run(self):
         self.start()
