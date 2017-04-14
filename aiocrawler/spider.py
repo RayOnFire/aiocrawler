@@ -58,8 +58,6 @@ class BaseSpider(object):
         self.config = config
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
-        self.conn = sqlite3.connect(db_name)
-        self.cur = self.conn.cursor()
         self.url_in_loop = 0
         self.status_handler = {
             400: self.handle_400,
@@ -82,6 +80,8 @@ class BaseSpider(object):
             pass
 
     def _init_db(self):
+        self.conn = sqlite3.connect(self.db_name)
+        self.cur = self.conn.cursor()
         self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_fetch ("
                              "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                              "date TEXT,"
@@ -368,3 +368,9 @@ class RedisSpider(BaseSpider):
         }
         asyncio.ensure_future(self.log('logger_status', json.dumps(msg)))
         self.start()
+
+class MySQLSpider(BaseSpider):
+
+    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
+        super().__init__(loop, sem, config, db_name, headers)
+        
