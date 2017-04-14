@@ -117,7 +117,15 @@ class BaseSpider(object):
     async def log_interval(self):
         while True:
             await asyncio.sleep(5)
+            print(self._get_time())
             print('Current url in loop:', self.url_in_loop)
+            print('Current tasks:', self.Task.all_tasks())
+            print('Current queue:')
+            print('url_queue_for_mp:', self.url_queue_for_mp.qsize())
+            print('log_queue:', self.log_queue.qsize())
+            for (k, v) in self.url_queue_map.items():
+                print(k, v.qsize())
+            print('-------------------------------------------------------')
 
     def add_url(self, url, callback=None, options={}):
         self.url_in_loop += 1
@@ -188,11 +196,10 @@ class BaseSpider(object):
                     self.url_queue_map[handler_name].put({'response': item, 'options': options})
                 else:
                     if self.handlers[handler_name]['type'] == 'binary':
-                        binary = await response.binary()
-                        self.handlers[handler_name]['callback'](binary, self, options)
+                        item = await response.binary()
                     elif self.handlers[handler_name]['type'] == 'text':
-                        text = await response.text()
-                        self.handlers[handler_name]['callback'](text, self, options)
+                        item = await response.text()
+                    self.handlers[handler_name]['callback'](item, self, options)
             except aiohttp.client_exceptions.ClientPayloadError:
                 self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'CLIENTPAYLOADERROR', url)})
                 asyncio.ensure_future(self.refetch(url, handler_name, options))
@@ -228,8 +235,8 @@ class BaseSpider(object):
             handler(item, item_queue, url_queue)
 
     @staticmethod
-    def logger_process(conn, log_queue):
-        conn = sqlite3.connect('log.db')
+    def logger_process(db_name, conn, log_queue):
+        conn = sqlite3.connect(db_name)
         while True:
             log = log_queue.get()
             sql = 'INSERT INTO ' + log['table'] + ' VALUES (' + ('?, ' * log['args'])[:-2] + ')'
@@ -250,7 +257,7 @@ class BaseSpider(object):
                 self.url_queue_map[k] = self.url_queue_manager.Queue()
         if len(seprate_handlers) > 0:
             with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers) + 1) as executor:
-                loop.run_in_executor(executor, self.logger_process, self.conn, self.log_queue)
+                loop.run_in_executor(executor, self.logger_process, self.db_name, self.conn, self.log_queue)
                 for h in seprate_handlers:
                     if h['no_wrapper']:
                         loop.run_in_executor(executor, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
