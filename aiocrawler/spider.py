@@ -119,7 +119,7 @@ class BaseSpider(object):
             await asyncio.sleep(5)
             print(self._get_time())
             print('Current url in loop:', self.url_in_loop)
-            print('Current tasks:', self.Task.all_tasks())
+            print('Current tasks:', len(asyncio.Task.all_tasks()))
             print('Current queue:')
             print('url_queue_for_mp:', self.url_queue_for_mp.qsize())
             print('log_queue:', self.log_queue.qsize())
@@ -228,6 +228,11 @@ class BaseSpider(object):
             if self.is_end:
                 future.set_result('Done!')
 
+    async def log_commit(self):
+        while True:
+            await asyncio.sleep(5)
+            self.conn.commit()
+
     @staticmethod
     def process_wrapper(handler, item_queue, url_queue):
         while True:
@@ -236,12 +241,17 @@ class BaseSpider(object):
 
     @staticmethod
     def logger_process(db_name, conn, log_queue):
+        def commit(sig, frame):
+            conn.commit()
+            print('log commit!')
         conn = sqlite3.connect(db_name)
+        signal.setitimer(signal.ITIMER_REAL, 5, 5)
+        signal.signal(signal.SIGALRM, commit)
         while True:
             log = log_queue.get()
             sql = 'INSERT INTO ' + log['table'] + ' VALUES (' + ('?, ' * log['args'])[:-2] + ')'
             conn.execute(sql, log['data'])
-            conn.commit() # TODO: use timer signal to commit?
+            #conn.commit() # TODO: use timer signal to commit?
 
     def stop(self):
         self.is_end = True
