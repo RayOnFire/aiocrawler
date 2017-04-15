@@ -45,7 +45,7 @@ class BaseSpider(object):
                          processes to do some clean up job.
     """
 
-    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
+    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None, init_url=False, store_url=False):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -58,6 +58,7 @@ class BaseSpider(object):
         self.config = config
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
+        self.store_url = store_url
         self.url_in_loop = 0
         self.status_handler = {
             400: self.handle_400,
@@ -66,7 +67,8 @@ class BaseSpider(object):
             'others': self.handle_others,
         }
         self._init_db()
-        self._init_url()
+        if init_url:
+            self._init_url()
         if headers:
             self.headers = headers
 
@@ -153,7 +155,8 @@ class BaseSpider(object):
             return
         else:
             # avoid other corotinue fetch same url
-            self.urls[url] = None
+            if self.store_url:
+                self.urls[url] = None
         async with self.sem:
             await self.fetch(url, handler_name, options, proxy)
 
@@ -172,14 +175,16 @@ class BaseSpider(object):
                 #self.conn.commit()
 
     async def refetch(self, url, handler_name, options, proxy=None):
-        del self.urls[url]
+        if self.store_url:
+            del self.urls[url]
         await self.bound_fetch(url, handler_name, options, proxy)
 
     async def handle_response(self, response, url, headers, handler_name, options):
         self.url_in_loop -= 1
         self.log_queue.put_nowait({'table': 'logger_fetch', 'args': 5, 'data': (None, self._get_time(), url, handler_name, response.status)})
         if response.status == 200:
-            self.urls[url] = self._get_time()  # For future use to set url expire time
+            if self.store_url:
+                self.urls[url] = self._get_time()  # For future use to set url expire time
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
                 print('set cookie:', response.headers['Set-Cookie'])
                 headers.update({'Cookie': response.headers['Set-Cookie']})
@@ -373,4 +378,3 @@ class MySQLSpider(BaseSpider):
 
     def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
         super().__init__(loop, sem, config, db_name, headers)
-        
