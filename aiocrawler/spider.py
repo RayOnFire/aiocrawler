@@ -49,6 +49,7 @@ class BaseSpider(object):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
+        self.sem_number = sem
         self.is_end = False
         self.session = aiohttp.ClientSession()
         self.url_queue_manager = mp.Manager()
@@ -139,7 +140,7 @@ class BaseSpider(object):
             await asyncio.sleep(0.1)
             if not self.url_queue_for_mp.empty():
                 while True:
-                    if self.url_in_loop > 100:
+                    if self.url_in_loop > self.sem_number * 2:
                         break
                     try:
                         item = self.url_queue_for_mp.get_nowait() # use get_nowait to avoid block event loop
