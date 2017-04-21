@@ -1,5 +1,6 @@
 sudo apt update
 sudo apt install -y python-pip
+sudo apt install -y python3-dev
 pip install virtualenv
 cd ~/aiocrawler
 virtualenv env -p /usr/bin/python3
