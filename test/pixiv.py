@@ -29,22 +29,24 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #signal.signal(signal.SIGINT, on_terminate)
     def commit(sig, frame):
         conn.commit()
-        print('pixiv commit!')
+        print('pixiv commit!', 'last entry:', last_entry)
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
     signal.signal(signal.SIGALRM, commit)
     conn = sqlite3.connect('pixiv3.db')
+    last_entry = 0
     while True:
         item = queue.get()
         try:
             conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
             #conn.commit()
+            last_entry = item['options']['url'][-8:]
         except:
             pass
 
 
 def url_adder(url_queue: mp.Queue) -> None:
     try:
-        for i in range(10000000, 20000000):
+        for i in range(22313820, 30000000):
             o = {
                 'url': 'https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i),
                 'handler': 'add_to_database',
@@ -55,11 +57,11 @@ def url_adder(url_queue: mp.Queue) -> None:
     except KeyboardInterrupt:
         print('url_adder exit!')
 
-#config={'proxy': 'http://127.0.0.1:1080'}
+config={'proxy': 'http://127.0.0.1:1080'}
 
 if __name__ == '__main__':
     init_db()
-    pixiv_spider = BaseSpider(db_name='log2.db', headers=h_pixiv, sem=50)
+    pixiv_spider = BaseSpider(config=config, db_name='log2.db', headers=h_pixiv, sem=50)
     pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
     p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp,), name='url_adder')
     p.start()
