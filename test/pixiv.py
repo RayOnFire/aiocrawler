@@ -4,6 +4,8 @@ import multiprocessing as mp
 import signal
 import os
 import sys
+import psutil
+from functools import partial
 
 h_pixiv = {
     'App-OS': 'ios',
@@ -28,11 +30,23 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #   print('committed!')
     #   os.kill(mp.current_process().pid, signal.SIGTERM)
     #signal.signal(signal.SIGINT, on_terminate)
-    def commit(sig, frame):
+    def commit(p_entry, sig, frame):
+        print(locals())
         conn.commit()
         print('pixiv commit!', 'last entry:', last_entry)
+        if last_entry != p_entry[0]:
+            p_entry[0] = last_entry
+        else:
+            print('equal')
+            for pid in psutil.pids():
+                p = psutil.Process(pid)
+                if p.name() == 'python':
+                    print(pid)
+                    os.kill(pid, signal.SIGKILL)
+        
+    p_entry = [-1,]
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
-    signal.signal(signal.SIGALRM, commit)
+    signal.signal(signal.SIGALRM, partial(commit, p_entry))
     conn = sqlite3.connect('pixiv3.db')
     last_entry = 0
     while True:
