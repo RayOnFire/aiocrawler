@@ -3,6 +3,7 @@ import sqlite3
 import multiprocessing as mp
 import signal
 import os
+import sys
 
 h_pixiv = {
     'App-OS': 'ios',
@@ -44,9 +45,9 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
             pass
 
 
-def url_adder(url_queue: mp.Queue) -> None:
+def url_adder(url_queue: mp.Queue, low, hign) -> None:
     try:
-        for i in range(22313820, 30000000):
+        for i in range(low, high):
             o = {
                 'url': 'https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i),
                 'handler': 'add_to_database',
@@ -60,10 +61,12 @@ def url_adder(url_queue: mp.Queue) -> None:
 config={'proxy': 'http://127.0.0.1:1080'}
 
 if __name__ == '__main__':
+    low = int(sys.argv[1])
+    high = int(sys.argv[2])
     init_db()
     pixiv_spider = BaseSpider(config=config, db_name='log2.db', headers=h_pixiv, sem=50)
     pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
-    p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp,), name='url_adder')
+    p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp, low, high), name='url_adder')
     p.start()
     #for i in range(10000):
     #   pixiv_spider.add_url('https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i), 'add_to_database')

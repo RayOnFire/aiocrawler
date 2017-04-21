@@ -7,3 +7,4 @@ source env/bin/activate
 pip install -e .
 pip install aiohttp
 cd test
+echo 'Done'
