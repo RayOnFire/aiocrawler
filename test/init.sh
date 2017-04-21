@@ -6,5 +6,6 @@ virtualenv env -p /usr/bin/python3
 source env/bin/activate
 pip install -e .
 pip install aiohttp
+pip install psutil
 cd test
 echo 'Done'
