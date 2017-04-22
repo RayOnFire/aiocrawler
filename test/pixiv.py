@@ -6,6 +6,7 @@ import signal
 import os
 import sys
 import psutil
+import json
 from functools import partial
 
 h_pixiv = {
@@ -18,9 +19,28 @@ h_pixiv = {
 def init_db():
     conn = sqlite3.connect('pixiv3.db')
     conn.execute(("CREATE TABLE IF NOT EXISTS pixiv ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "url TEXT NOT NULL UNIQUE,"
-                    "info TEXT NOT NULL)"))
+                        "id INTERGER PRIMARY KEY,"
+                        "create_date TEXT,"
+                        "height INTEGER,"
+                        "width INTEGER,"
+                        "url TEXT,"
+                        "title TEXT,"
+                        "comment_count INTEGER,"
+                        "view_count INTEGER,"
+                        "bookmark_count INTEGER,"
+                        "username TEXT)"))
+
+    conn.execute(("CREATE TABLE IF NOT EXISTS tag ("
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "name TEXT NOT NULL UNIQUE)"))
+
+    conn.execute(("CREATE TABLE IF NOT EXISTS pixiv_tag ("
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "pixiv_id INTEGER,"
+                        "tag_id INTEGER,"
+                        "FOREIGN KEY (pixiv_id) REFERENCES pixiv(id),"
+                        "FOREIGN KEY (tag_id) REFERENCES tag(id))"))
+
     conn.commit()
     conn.close()
 
@@ -54,14 +74,34 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
     signal.signal(signal.SIGALRM, partial(commit, p_entry))
     conn = sqlite3.connect('pixiv3.db')
+    cursor = conn.cursor()
     while True:
+        stdout('add_to_database start')
         item = queue.get()
-        try:
-            conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
-            #conn.commit()
-            p_entry[1] = item['options']['url'][-8:]
-        except:
-            pass
+        #stdout(item)
+        obj = json.loads(item['response'])
+        #stdout(obj)
+        tag_ids = []
+        for tag in obj['illust']['tags']:
+            cursor.execute("SELECT id FROM tag WHERE name=?", (tag['name'],))
+            tag_id = cursor.fetchone()
+            if tag_id:
+                tag_ids.append(tag_id[0])
+            else:
+                cursor.execute("INSERT INTO tag VALUES (null, ?)", (tag['name'],))
+                cursor.execute("SELECT id FROM tag WHERE name=?", (tag['name'],))
+                tag_id = cursor.fetchone()
+                tag_ids.append(tag_id[0])
+        obj = obj['illust']
+        data = (obj['id'], obj['create_date'], obj['height'], obj['width'], obj['meta_single_page'].get('original_image_url', None), obj['title'], obj['total_comments'], obj['total_view'], obj['total_bookmarks'], obj['user']['account'])
+        cursor.execute("INSERT INTO pixiv VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+        for tag_id in tag_ids:
+            cursor.execute("INSERT INTO pixiv_tag VALUES (null, ?, ?)", (obj['id'], tag_id))
+        '''
+        conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
+        #conn.commit()
+        '''
+        p_entry[1] = item['options']['url'][-8:]
 
 
 def url_adder(url_queue: mp.Queue, low, hign) -> None:
