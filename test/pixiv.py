@@ -48,7 +48,10 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
                     p = psutil.Process(pid)
                     if p.name() == 'python':
                         stdout(pid)
-                        os.kill(pid, signal.SIGKILL)
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except:
+                            pass
         
     p_entry = [-1, 0]
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
