@@ -23,6 +23,10 @@ def init_db():
     conn.commit()
     conn.close()
 
+def stdout(s):
+    sys.stdout.write(s + '\n')
+    sys.stdout.flush()
+
 def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #def on_terminate(sig, frame):
     #   conn.commit()
@@ -32,16 +36,16 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #signal.signal(signal.SIGINT, on_terminate)
     def commit(p_entry, sig, frame):
         conn.commit()
-        print('pixiv commit!', 'last entry:', p_entry[1], 'previous entry:', p_entry[0])
+        stdout('pixiv commit!' + ' ' + 'last entry:' + ' ' + str(p_entry[1]) + ' ' + 'previous entry:' + ' ' + str(p_entry[0]))
         if p_entry[1] != 0:
             if p_entry[1] != p_entry[0]:
                 p_entry[0] = p_entry[1]
             else:
-                print('equal')
+                stdout('equal')
                 for pid in psutil.pids():
                     p = psutil.Process(pid)
                     if p.name() == 'python':
-                        print(pid)
+                        stdout(pid)
                         os.kill(pid, signal.SIGKILL)
         
     p_entry = [-1, 0]

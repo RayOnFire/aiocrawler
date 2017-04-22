@@ -10,4 +10,4 @@ pip install aiohttp
 pip install psutil
 cd test
 python pixiv.py $1 $2
-echo 'Done'
+rc=$?; if [[ $rc != 0 ]]; then exit $rc; fi
