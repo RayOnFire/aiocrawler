@@ -31,30 +31,29 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #   os.kill(mp.current_process().pid, signal.SIGTERM)
     #signal.signal(signal.SIGINT, on_terminate)
     def commit(p_entry, sig, frame):
-        print(locals())
         conn.commit()
-        print('pixiv commit!', 'last entry:', last_entry)
-        if last_entry != p_entry[0]:
-            p_entry[0] = last_entry
-        else:
-            print('equal')
-            for pid in psutil.pids():
-                p = psutil.Process(pid)
-                if p.name() == 'python':
-                    print(pid)
-                    os.kill(pid, signal.SIGKILL)
+        print('pixiv commit!', 'last entry:', p_entry[1], 'previous entry:', p_entry[0])
+        if p_entry[1] != 0:
+            if p_entry[1] != p_entry[0]:
+                p_entry[0] = p_entry[1]
+            else:
+                print('equal')
+                for pid in psutil.pids():
+                    p = psutil.Process(pid)
+                    if p.name() == 'python':
+                        print(pid)
+                        os.kill(pid, signal.SIGKILL)
         
-    p_entry = [-1,]
+    p_entry = [-1, 0]
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
     signal.signal(signal.SIGALRM, partial(commit, p_entry))
     conn = sqlite3.connect('pixiv3.db')
-    last_entry = 0
     while True:
         item = queue.get()
         try:
             conn.execute("INSERT INTO pixiv VALUES (?, ?, ?)", (None, item['options']['url'], item['response']))
             #conn.commit()
-            last_entry = item['options']['url'][-8:]
+            p_entry[1] = item['options']['url'][-8:]
         except:
             pass
 
