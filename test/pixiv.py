@@ -80,13 +80,13 @@ def url_adder(url_queue: mp.Queue, low, hign) -> None:
     except KeyboardInterrupt:
         print('url_adder exit!')
 
-#config={'proxy': 'http://127.0.0.1:1080'}
+config={'proxy': 'http://127.0.0.1:1080'}
 
 if __name__ == '__main__':
     low = int(sys.argv[1])
     high = int(sys.argv[2])
     init_db()
-    pixiv_spider = BaseSpider(db_name='log2.db', headers=h_pixiv, sem=50)
+    pixiv_spider = BaseSpider(config=config, db_name='log2.db', headers=h_pixiv, sem=50)
     pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
     p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp, low, high), name='url_adder')
     p.start()
