@@ -1,4 +1,5 @@
 from aiocrawler.spider import BaseSpider
+from aiocrawler.exceptions import NotStartError, ProcessStopError
 import sqlite3
 import multiprocessing as mp
 import signal
@@ -37,23 +38,19 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     #   os.kill(mp.current_process().pid, signal.SIGTERM)
     #signal.signal(signal.SIGINT, on_terminate)
     def commit(p_entry, sig, frame):
+        if p_entry[2] == 5:
+            raise NotStartError
         conn.commit()
         stdout('pixiv commit!' + ' ' + 'last entry:' + ' ' + str(p_entry[1]) + ' ' + 'previous entry:' + ' ' + str(p_entry[0]))
         if p_entry[1] != 0:
             if p_entry[1] != p_entry[0]:
                 p_entry[0] = p_entry[1]
             else:
-                stdout('equal')
-                for pid in psutil.pids():
-                    p = psutil.Process(pid)
-                    if p.name() == 'python':
-                        stdout(pid)
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except:
-                            pass
+                raise ProcessStopError
+        else:
+            p_entry[2] += 1
         
-    p_entry = [-1, 0]
+    p_entry = [-1, 0, 0]
     signal.setitimer(signal.ITIMER_REAL, 5, 5)
     signal.signal(signal.SIGALRM, partial(commit, p_entry))
     conn = sqlite3.connect('pixiv3.db')
@@ -81,12 +78,26 @@ def url_adder(url_queue: mp.Queue, low, hign) -> None:
         print('url_adder exit!')
 
 #config={'proxy': 'http://127.0.0.1:1080'}
+class PixivSpider(BaseSpider):
+
+    def handle_child_process_exit(self, future):
+        ex = future.exception()
+        if isinstance(ex, NotStartError):
+            print('NotStartError')
+            return 2
+        elif isinstance(ex, ProcessStopError):
+            print('ProcessStopError')
+            return 3
 
 if __name__ == '__main__':
     low = int(sys.argv[1])
     high = int(sys.argv[2])
     init_db()
-    pixiv_spider = BaseSpider(db_name='log2.db', headers=h_pixiv, sem=50)
+    if len(sys.argv) > 3 and sys.argv[3] == 'proxy':
+        config={'proxy': 'http://127.0.0.1:1080'}
+    else:
+        config = {}
+    pixiv_spider = PixivSpider(config=config, db_name='log2.db', headers=h_pixiv, sem=50)
     pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
     p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp, low, high), name='url_adder')
     p.start()

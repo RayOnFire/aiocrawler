@@ -11,6 +11,7 @@ import sqlite3
 import time
 import signal
 import os
+import sys
 from copy import deepcopy
 from pprint import pprint
 
@@ -29,6 +30,43 @@ def get_host(url):
     elif url.startswith('http'):
         u = url.replace('http://', '')
     return u.split('/')[0]
+
+class Pipeline(object):
+
+    def __init__(self, start_pipe):
+        self.start_pipe = start_pipe
+
+    def add(self, handler):
+        pass
+
+class Sqlite3Logger(object):
+
+    def __init__(self, db_name, separate=False):
+        self.db_name = db_name
+        self._init_db()
+
+    def _init_db(self):
+        self.conn = sqlite3.connect(self.db_name)
+        self.cur = self.conn.cursor()
+        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_fetch ("
+                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                             "date TEXT,"
+                             "url TEXT NOT NULL,"
+                             "handler_name TEXT,"
+                             "status INTEGER NOT NULL)"))
+        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_info ("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                            "date TEXT,"
+                            "type TEXT NOT NULL,"
+                            "message TEXT)"))
+        self.conn.commit()
+
+    @staticmethod
+    def start():
+        pass
+
+
+
 
 class BaseSpider(object):
     """ The generic spider with basic function
@@ -50,11 +88,10 @@ class BaseSpider(object):
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
         self.sem_number = sem
-        self.is_end = False
         self.session = aiohttp.ClientSession()
         self.url_queue_manager = mp.Manager()
         self.url_queue_map = {}
-        self.url_queue_for_mp = self.url_queue_manager.Queue(50)
+        self.url_queue_for_mp = self.url_queue_manager.Queue(self.sem_number * 2)
         self.log_queue = self.url_queue_manager.Queue()
         self.config = config
         self.db_name = db_name
@@ -228,11 +265,16 @@ class BaseSpider(object):
     async def handle_500(self, info):
         return False
 
-    async def check_end(self, future):
+    async def check_end(self, executor_futures):
         while True:
             await asyncio.sleep(1)
-            if self.is_end:
-                future.set_result('Done!')
+            for f in executor_futures:
+                if f.done():
+                    rc = self.handle_child_process_exit(f)
+                    return rc
+
+    def handle_child_process_exit(future):
+        pass
 
     async def log_commit(self):
         while True:
@@ -259,9 +301,6 @@ class BaseSpider(object):
             conn.execute(sql, log['data'])
             #conn.commit() # TODO: use timer signal to commit?
 
-    def stop(self):
-        self.is_end = True
-
     def start(self):
         self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'SPIDER_START', None)})
         seprate_handlers = []
@@ -273,31 +312,19 @@ class BaseSpider(object):
                 self.url_queue_map[k] = self.url_queue_manager.Queue()
         if len(seprate_handlers) > 0:
             with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers) + 1) as executor:
-                loop.run_in_executor(executor, self.logger_process, self.db_name, self.conn, self.log_queue)
+                executor_futures = []
+                executor_futures.append(executor.submit(self.logger_process, self.db_name, self.conn, self.log_queue))
                 for h in seprate_handlers:
                     if h['no_wrapper']:
-                        loop.run_in_executor(executor, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
+                        executor_futures.append(executor.submit(h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp))
                     else:
-                        loop.run_in_executor(executor, self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp)
+                        executor_futures.append(executor.submit(self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp))
 
-                # Check flag and keep event loop
-                f = asyncio.Future()
-                asyncio.ensure_future(self.check_end(f))
                 asyncio.ensure_future(self.check_queue())
-                asyncio.ensure_future(self.log_interval())
-                try:
-                    loop.run_until_complete(f)
-                except Exception as e:
-                    # retrieve tasks to avoid exception show in console
-                    #print(e.message)
-                    tasks = asyncio.Task.all_tasks()
-                    # close db connection
-                    self.conn.commit()
-                    #self.conn.close()
-                    # use SIGINT to inform child process to exit.
-                    for p in mp.active_children():
-                        os.kill(p.pid, signal.SIGINT)
-
+                #asyncio.ensure_future(self.log_interval())
+                
+                rc = loop.run_until_complete(self.check_end(executor_futures))
+                sys.exit(rc)
         else:
             f = asyncio.Future()
             asyncio.ensure_future(self.check_end(f))
