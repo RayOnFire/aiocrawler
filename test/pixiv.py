@@ -76,11 +76,8 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
     conn = sqlite3.connect('pixiv3.db')
     cursor = conn.cursor()
     while True:
-        stdout('add_to_database start')
         item = queue.get()
-        #stdout(item)
         obj = json.loads(item['response'])
-        #stdout(obj)
         tag_ids = []
         for tag in obj['illust']['tags']:
             cursor.execute("SELECT id FROM tag WHERE name=?", (tag['name'],))
