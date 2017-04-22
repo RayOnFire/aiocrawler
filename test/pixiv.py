@@ -24,6 +24,8 @@ def init_db():
     conn.close()
 
 def stdout(s):
+    if type(s) != str:
+        s = str(s)
     sys.stdout.write(s + '\n')
     sys.stdout.flush()
 
