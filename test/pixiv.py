@@ -28,7 +28,8 @@ def init_db():
                         "comment_count INTEGER,"
                         "view_count INTEGER,"
                         "bookmark_count INTEGER,"
-                        "username TEXT)"))
+                        "username TEXT,"
+                        "type TEXT)"))
 
     conn.execute(("CREATE TABLE IF NOT EXISTS tag ("
                         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -90,8 +91,8 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
                 tag_id = cursor.fetchone()
                 tag_ids.append(tag_id[0])
         obj = obj['illust']
-        data = (obj['id'], obj['create_date'], obj['height'], obj['width'], obj['meta_single_page'].get('original_image_url', None), obj['title'], obj['total_comments'], obj['total_view'], obj['total_bookmarks'], obj['user']['account'])
-        cursor.execute("INSERT INTO pixiv VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
+        data = (obj['id'], obj['create_date'], obj['height'], obj['width'], obj['meta_single_page'].get('original_image_url', None), obj['title'], obj['total_comments'], obj['total_view'], obj['total_bookmarks'], obj['user']['account'], obj['type'])
+        cursor.execute("INSERT INTO pixiv VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data)
         for tag_id in tag_ids:
             cursor.execute("INSERT INTO pixiv_tag VALUES (null, ?, ?)", (obj['id'], tag_id))
         '''
