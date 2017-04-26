@@ -3,3 +3,9 @@ class NotStartError(Exception):
 
 class ProcessStopError(Exception):
 	pass
+
+class DuplicateHandlerNameError(Exception):
+	pass
+
+class NoHandlerError(Exception):
+	pass

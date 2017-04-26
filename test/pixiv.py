@@ -1,4 +1,5 @@
 from aiocrawler.spider import BaseSpider
+from aiocrawler.logger import Sqlite3Logger
 from aiocrawler.exceptions import NotStartError, ProcessStopError
 import sqlite3
 import multiprocessing as mp
@@ -11,9 +12,16 @@ from functools import partial
 
 h_pixiv = {
     'App-OS': 'ios',
-    'App-OS-Version': '10.3.1',
+    'App-OS-Version': '9.3.1',
     'App-Version': '6.7.1',
-    'User-Agent': 'PixivIOSApp/6.7.1 (iOS 10.3.1; iPhone8,1)'
+    'User-Agent': 'PixivIOSApp/6.7.1 (iOS 9.3.1; iPhone8,1)'
+}
+
+h_pixiv = {
+    'App-OS-Version': '9.3.3',
+    'App-OS': 'ios',
+    'User-Agent': 'PixivIOSApp/6.0.8 (iOS 9.3.3; iPhone6,1)',
+    'App-Version': '6.0.8'
 }
 
 def init_db():
@@ -102,8 +110,9 @@ def add_to_database(queue: mp.Queue, url_queue: mp.Queue) -> None:
         p_entry[1] = item['options']['url'][-8:]
 
 
-def url_adder(url_queue: mp.Queue, low, hign) -> None:
+def url_adder(url_queue: mp.Queue, low, high) -> None:
     try:
+        print(url_queue)
         for i in range(low, high):
             o = {
                 'url': 'https://app-api.pixiv.net/v1/illust/detail?illust_id=' + str(i),
@@ -135,8 +144,8 @@ if __name__ == '__main__':
         config={'proxy': 'http://127.0.0.1:1080'}
     else:
         config = {}
-    pixiv_spider = PixivSpider(config=config, db_name='log2.db', headers=h_pixiv, sem=50)
-    pixiv_spider.register_callback('add_to_database', 'text', add_to_database, run_in_process=True, no_wrapper=True)
+    pixiv_spider = PixivSpider(config=config, logger_class=Sqlite3Logger, db_name='log2.db', headers=h_pixiv, sem=50)
+    pixiv_spider.register_callback('add_to_database', 'text', add_to_database, no_wrapper=True)
     p = mp.Process(target=url_adder, args=(pixiv_spider.url_queue_for_mp, low, high), name='url_adder')
     p.start()
     #for i in range(10000):

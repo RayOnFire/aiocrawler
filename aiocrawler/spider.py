@@ -14,6 +14,11 @@ import os
 import sys
 from copy import deepcopy
 from pprint import pprint
+from urllib.parse import urlparse
+from functools import partial
+
+from aiocrawler.exceptions import *
+from aiocrawler.logger import *
 
 try:
     import asyncio_redis
@@ -24,49 +29,22 @@ COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393',
 }
 
+'''
+Example: get_host('http://www.google.com') -> 'google.com'
+         get_host('https://abc.facebook.com') -> 'facebook.com'
+'''
 def get_host(url):
-    if url.startswith('https'):
-        u = url.replace('https://', '')
-    elif url.startswith('http'):
-        u = url.replace('http://', '')
-    return u.split('/')[0]
+    parse = urlparse(url)
+    netloc = parse.netloc
+    return '.'.join(netloc.split('.')[-2:])
 
-class Pipeline(object):
+class Handler(object):
 
-    def __init__(self, start_pipe):
-        self.start_pipe = start_pipe
-
-    def add(self, handler):
-        pass
-
-class Sqlite3Logger(object):
-
-    def __init__(self, db_name, separate=False):
-        self.db_name = db_name
-        self._init_db()
-
-    def _init_db(self):
-        self.conn = sqlite3.connect(self.db_name)
-        self.cur = self.conn.cursor()
-        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_fetch ("
-                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                             "date TEXT,"
-                             "url TEXT NOT NULL,"
-                             "handler_name TEXT,"
-                             "status INTEGER NOT NULL)"))
-        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_info ("
-                            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                            "date TEXT,"
-                            "type TEXT NOT NULL,"
-                            "message TEXT)"))
-        self.conn.commit()
-
-    @staticmethod
-    def start():
-        pass
-
-
-
+    def __init__(self, name, type_, callback, no_wrapper=False):
+        self.name = name
+        self.type_ = type_
+        self.callback = callback
+        self.no_wrapper = no_wrapper
 
 class BaseSpider(object):
     """ The generic spider with basic function
@@ -83,7 +61,8 @@ class BaseSpider(object):
                          processes to do some clean up job.
     """
 
-    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None, init_url=False, store_url=False):
+    def __init__(self, loop=None, sem=10, config={}, logger_class=None, db_name='log.db', headers=None,
+                    init_url=False, store_url=False, timeout=60, timeout_retry=10):
         self.handlers = {}
         self.headers_host = {}
         self.sem = asyncio.Semaphore(sem)
@@ -94,70 +73,39 @@ class BaseSpider(object):
         self.url_queue_for_mp = self.url_queue_manager.Queue(self.sem_number * 2)
         self.log_queue = self.url_queue_manager.Queue()
         self.config = config
+        self.logger_class = logger_class
         self.db_name = db_name
         self.urls = {} # use to store crawled url and date
         self.store_url = store_url
         self.url_in_loop = 0
+        self.timeout = timeout
+        self.timeout_retry = timeout_retry
         self.status_handler = {
-            400: self.handle_400,
             404: self.handle_404,
-            500: self.handle_500,
-            'others': self.handle_others,
+            'others': self.handle_others_status,
         }
-        self._init_db()
-        if init_url:
-            self._init_url()
+        # TODO: add init_url method to avoid recrawl same urls (from custom database), method may be overridable.
         if headers:
-            self.headers = headers
+            self.predefined_headers = headers
 
-    def _init_url(self):
-        try:
-            self.cur.execute("SELECT DISTINCT url FROM logger_fetch")
-            urls = self.cur.fetchall()
-            for url in urls:
-                self.urls[url] = None
-        except sqlite3.OperationalError:
-            pass
-
-    def _init_db(self):
-        self.conn = sqlite3.connect(self.db_name)
-        self.cur = self.conn.cursor()
-        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_fetch ("
-                             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                             "date TEXT,"
-                             "url TEXT NOT NULL,"
-                             "handler_name TEXT,"
-                             "status INTEGER NOT NULL)"))
-        self.conn.execute(("CREATE TABLE IF NOT EXISTS logger_info ("
-                            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                            "date TEXT,"
-                            "type TEXT NOT NULL,"
-                            "message TEXT)"))
-        self.conn.commit()
-
-    def _get_time(self):
+    '''Utilities
+    Folowing methods are utility function
+    '''
+    def __get_time(self):
         return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    def register_callback(self, name, response_type, callback, run_in_process=False, options=None, no_wrapper=False):
-        if name in self.handlers:
-            # TODO: raise error here
-            print('handler name should be unique')
-            return
-        self.handlers[name] = {'name': name, 'type': response_type, 'callback': callback, 'run_in_process': run_in_process, 'no_wrapper': no_wrapper}
 
-    def _get_headers(self, hostname):
-        if hasattr(self, 'headers'):
-            return self.headers
-        if hostname in self.headers_host:
-            return self.headers_host[hostname]
-        else:
+    def __get_headers(self, hostname):
+        if not hostname in self.headers_host:
             self.headers_host[hostname] = deepcopy(COMMON_HEADERS)
-            return self.headers_host[hostname]
+            if hasattr(self, 'predefined_headers'):
+                self.headers_host[hostname].update(self.predefined_headers)
+        return self.headers_host[hostname]
 
-    async def log_interval(self):
+    async def __log_interval(self):
         while True:
             await asyncio.sleep(5)
-            print(self._get_time())
+            print(self.__get_time())
             print('Current url in loop:', self.url_in_loop)
             print('Current tasks:', len(asyncio.Task.all_tasks()))
             print('Current queue:')
@@ -167,12 +115,17 @@ class BaseSpider(object):
                 print(k, v.qsize())
             print('-------------------------------------------------------')
 
-    def add_url(self, url, callback=None, options={}):
-        self.url_in_loop += 1
-        task = asyncio.ensure_future(self.bound_fetch(url, callback, options))
-        #print(task)
+    '''Methods as a timing task
+    '''
+    async def __check_future_exception(self):
+        while True:
+            await asyncio.sleep(0.1)
+            current_tasks = asyncio.Task.all_tasks()
+            for task in current_tasks:
+                if task.done():
+                    print(task.exception())
 
-    async def check_queue(self):
+    async def __check_url_queue(self):
         while True:
             await asyncio.sleep(0.1)
             if not self.url_queue_for_mp.empty():
@@ -185,101 +138,95 @@ class BaseSpider(object):
                     except queue.Empty:
                         break
 
-    async def bound_fetch(self, url, handler_name, options, proxy=None):
+    '''Methods for fetching url
+    '''
+    async def __bound_fetch(self, url, handler_name, options, proxy=None):
         # TODO: Cause race condition here?
         if url in self.urls:
-            self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'DUPLICATE_URL', url)})
-            #self.conn.commit()
+            self.log(meta='logger_info', args=4, time=self.__get_time(), type_='DUPLICATE_URL', url=url)
             return
         else:
             # avoid other corotinue fetch same url
             if self.store_url:
                 self.urls[url] = None
         async with self.sem:
-            await self.fetch(url, handler_name, options, proxy)
+            await self.__fetch(url, handler_name, options, proxy)
 
-    async def fetch(self, url, handler_name, options, proxy=None):
-        o = deepcopy(options)
-        o.update({'url': url})
-        while True:
-            headers = self._get_headers(get_host(url))
-            try:
-                response = await self.session.request('GET', url, headers=headers, proxy=self.config.get('proxy', None))
-                if await self.handle_response(response, url, headers, handler_name, o):
-                    break
-            except aiohttp.client_exceptions.ServerDisconnectedError:
-                #asyncio.ensure_future(self.refetch(url, handler_name, options))
-                self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'SERVER_DISCONNECT_EXCEPTION', url)})
-                #self.conn.commit()
+    async def __fetch(self, url, handler_name, options, proxy=None, retry_time=0):
+        options = deepcopy(options)
+        options.update({'url': url})
+        headers = self.__get_headers(get_host(url))
+        response = asyncio.ensure_future(self.session.request('GET', url, headers=headers, proxy=self.config.get('proxy', None), timeout=self.timeout))
+        response.add_done_callback(partial(self.__response_done_handler, url, headers, handler_name, options, retry_time))
 
-    async def refetch(self, url, handler_name, options, proxy=None):
-        if self.store_url:
-            del self.urls[url]
-        await self.bound_fetch(url, handler_name, options, proxy)
+    def __response_done_handler(self, url, headers, handler_name, options, retry_time, future):
+        try:
+            asyncio.ensure_future(self.__handle_response(future.result(), url, headers, handler_name, options))
+        except concurrent.futures._base.TimeoutError:
+            retry_time += 1
+            if retry_time == self.timeout_retry:
+                asyncio.ensure_future(self.__handle_bad_url(url, headers, handler_name, options, retry_time, reason='timeout'))
+            else:
+                asyncio.ensure_future(self.__fetch(url, handler_name, options, retry_time=retry_time))
 
-    async def handle_response(self, response, url, headers, handler_name, options):
+    async def __handle_response(self, response, url, headers, handler_name, options):
         self.url_in_loop -= 1
-        self.log_queue.put_nowait({'table': 'logger_fetch', 'args': 5, 'data': (None, self._get_time(), url, handler_name, response.status)})
+        self.log(meta='logger_fetch', args=5, time=self.__get_time(), url=url, handler_name=handler_name, response_status=response.status)
+
         if response.status == 200:
+            '''
+            For future use to set url expire time
+            WARNING: store url without expired time set may cause memory leakage when url increase rapidly or crawling for a long time
+            TODO: add option to let subclass choose other database as url store e.g. Redis
+            '''
             if self.store_url:
-                self.urls[url] = self._get_time()  # For future use to set url expire time
+                self.urls[url] = self.__get_time()
+
+            '''
+            Automatically handle server-side returned 'Set-Cookie' header
+            '''
             if 'Set-Cookie' in response.headers and not 'Cookie' in headers:
                 print('set cookie:', response.headers['Set-Cookie'])
                 headers.update({'Cookie': response.headers['Set-Cookie']})
+
+            '''
+            Raise NoHandlerError when handler not exists
+            '''
             if not handler_name in self.handlers:
-                if handler_name != None:
-                    # TODO: handler not exist, raise error
-                    return True
+                raise NoHandlerError(handler_name)
+
             try:
-                if self.handlers[handler_name]['run_in_process']:
-                    if self.handlers[handler_name]['type'] == 'text':
-                        item = await response.text()
-                    elif self.handlers[handler_name]['type'] == 'binary':
-                        item = await response.read()
-                    self.url_queue_map[handler_name].put({'response': item, 'options': options})
-                else:
-                    if self.handlers[handler_name]['type'] == 'binary':
-                        item = await response.binary()
-                    elif self.handlers[handler_name]['type'] == 'text':
-                        item = await response.text()
-                    self.handlers[handler_name]['callback'](item, self, options)
+                if self.handlers[handler_name].type_ == 'text':
+                    item = await response.text()
+                elif self.handlers[handler_name].type_ == 'binary':
+                    item = await response.read()
+                self.url_queue_map[handler_name].put({'response': item, 'options': options})
             except aiohttp.client_exceptions.ClientPayloadError:
-                self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'CLIENTPAYLOADERROR', url)})
+                self.log(meta='logger_info', args=4, time=self.__get_time(), type_='CLIENTPAYLOADERROR', url=url)
                 asyncio.ensure_future(self.refetch(url, handler_name, options))
             return True
         else:
+            '''
+            dispatcher according to response status code
+            '''
             if response.status in self.status_handler:
                 return not await self.status_handler[response.status](options)
             else:
                 return not await self.status_handler['others'](options)
 
-    async def handle_others(self, info):
-        return False
+    async def __handle_bad_url(self, url, headers, handler_name, options, retry_time, reason):
+        # TODO: inform user the url which can not be reached
+        # print('bad url {0}'.format(url))
+        pass
 
-    async def handle_404(self, info):
-        return False
-
-    async def handle_400(self, info):
-        return False
-
-    async def handle_500(self, info):
-        return False
-
-    async def check_end(self, executor_futures):
+    async def __check_handlers_exception(self, executor_futures):
         while True:
             await asyncio.sleep(1)
             for f in executor_futures:
                 if f.done():
+                    print(f.exception())
                     rc = self.handle_child_process_exit(f)
                     return rc
-
-    def handle_child_process_exit(future):
-        pass
-
-    async def log_commit(self):
-        while True:
-            await asyncio.sleep(5)
-            self.conn.commit()
 
     @staticmethod
     def process_wrapper(handler, item_queue, url_queue):
@@ -287,53 +234,78 @@ class BaseSpider(object):
             item = item_queue.get()
             handler(item, item_queue, url_queue)
 
-    @staticmethod
-    def logger_process(db_name, conn, log_queue):
-        def commit(sig, frame):
-            conn.commit()
-            print('log commit!')
-        conn = sqlite3.connect(db_name)
-        signal.setitimer(signal.ITIMER_REAL, 5, 5)
-        signal.signal(signal.SIGALRM, commit)
-        while True:
-            log = log_queue.get()
-            sql = 'INSERT INTO ' + log['table'] + ' VALUES (' + ('?, ' * log['args'])[:-2] + ')'
-            conn.execute(sql, log['data'])
-            #conn.commit() # TODO: use timer signal to commit?
-
+    ''' Start entry
+    This method is a crawler start entry.
+    '''
     def start(self):
-        self.log_queue.put_nowait({'table': 'logger_info', 'args': 4, 'data': (None, self._get_time(), 'SPIDER_START', None)})
+        self.log(meta='logger_info', args=4, time=self.__get_time(), type_='SPIDER_START')
         seprate_handlers = []
         loop = asyncio.get_event_loop()
 
+        '''
+        Retrieve handlers and create queue for each handler
+        '''
         for k, v in self.handlers.items():
-            if v['run_in_process']:
-                seprate_handlers.append(v)
-                self.url_queue_map[k] = self.url_queue_manager.Queue()
-        if len(seprate_handlers) > 0:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers) + 1) as executor:
-                executor_futures = []
-                executor_futures.append(executor.submit(self.logger_process, self.db_name, self.conn, self.log_queue))
-                for h in seprate_handlers:
-                    if h['no_wrapper']:
-                        executor_futures.append(executor.submit(h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp))
-                    else:
-                        executor_futures.append(executor.submit(self.process_wrapper, h['callback'], self.url_queue_map[h['name']], self.url_queue_for_mp))
+            seprate_handlers.append(v)
+            self.url_queue_map[k] = self.url_queue_manager.Queue()
 
-                asyncio.ensure_future(self.check_queue())
-                #asyncio.ensure_future(self.log_interval())
-                
-                rc = loop.run_until_complete(self.check_end(executor_futures))
-                sys.exit(rc)
-        else:
-            f = asyncio.Future()
-            asyncio.ensure_future(self.check_end(f))
-            asyncio.ensure_future(self.check_queue())
-            try:
-                loop.run_until_complete(f)
-            except KeyboardInterrupt:
-                self.conn.commit()
-                raise KeyboardInterrupt
+        if len(seprate_handlers) == 0:
+            raise NoHandlerError
+
+        '''
+        Run logger in seperate process
+        '''
+        if self.logger_class:
+            logger = self.logger_class(self.db_name)
+            logger.start(self.log_queue)
+
+        '''
+        Run handlers in ProcessPoolExecutor as seperated processes
+        '''
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(seprate_handlers) + 1) as executor:
+            executor_futures = []
+            for handler in seprate_handlers:
+                if handler.no_wrapper:
+                    executor_futures.append(executor.submit(handler.callback, self.url_queue_map[handler.name], self.url_queue_for_mp))
+                else:
+                    executor_futures.append(executor.submit(self.process_wrapper, handler.callback, self.url_queue_map[handler.name], self.url_queue_for_mp))
+
+            asyncio.ensure_future(self.__check_url_queue())
+            #asyncio.ensure_future(self.__check_future_exception())
+            #asyncio.ensure_future(self.__log_interval())
+            
+            rc = loop.run_until_complete(self.__check_handlers_exception(executor_futures))
+            for proc in mp.active_children():
+                proc.terminate()
+            sys.exit(rc)
+
+    '''Overridable
+    Override following methods is allowed.
+    '''
+    def log(self, **kwargs):
+        self.log_queue.put_nowait(kwargs)
+
+
+    def handle_child_process_exit(future):
+        return 1
+
+    async def handle_others_status(self, info):
+        return False
+
+    async def handle_404(self, info):
+        return False
+
+    '''
+    public methods
+    '''
+    def add_url(self, url, callback=None, options={}):
+        self.url_in_loop += 1
+        asyncio.ensure_future(self.__bound_fetch(url, callback, options))
+
+    def register_callback(self, name, response_type, callback, no_wrapper=False, options=None):
+        if name in self.handlers:
+            raise DuplicateHandlerNameError(name)
+        self.handlers[name] = Handler(name, response_type, callback, no_wrapper)
 
     def run(self):
         self.start()
@@ -359,7 +331,7 @@ class RedisSpider(BaseSpider):
     def add_redis_logger(name):
         pass
 
-    async def handle_others(self, info):
+    async def handle_others_status(self, info):
         await self.log('logger_other_status', json.dumps(info))
         return False
 
@@ -381,14 +353,14 @@ class RedisSpider(BaseSpider):
             await asyncio.sleep(0.1)
         await self.redis_conn.publish(logger_name, data)
 
-    async def check_end(self, future):
+    async def __check_handlers_exception(self, future):
         while True:
             await asyncio.sleep(1)
             if self.is_end:
                 future.set_result('Done!')
 
     async def handle_response(self, response, url, headers, handler_name, options):
-        await self.log('logger_url', json.dumps({'date': self._get_time(), 'url': url, 'handler': handler_name, 'status': response.status}))
+        await self.log('logger_url', json.dumps({'date': self.__get_time(), 'url': url, 'handler': handler_name, 'status': response.status}))
         return await super().handle_response(response, url, headers, handler_name, options)
 
     def stop(self):
@@ -396,13 +368,8 @@ class RedisSpider(BaseSpider):
 
     def run(self):
         msg = {
-            'date': self._get_time(),
+            'date': self.__get_time(),
             'handlers': [{'name': v['name'], 'type': v['type']} for (k, v) in self.handlers.items()]
         }
         asyncio.ensure_future(self.log('logger_status', json.dumps(msg)))
         self.start()
-
-class MySQLSpider(BaseSpider):
-
-    def __init__(self, loop=None, sem=10, config={}, db_name='log.db', headers=None):
-        super().__init__(loop, sem, config, db_name, headers)

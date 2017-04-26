@@ -5,3 +5,9 @@ log.db
 mp_test.py
 pixiv.db
 .gitignore
+img/
+*.json
+mock_server.py
+filter.py
+timeout_test.py
+rank_image.py
