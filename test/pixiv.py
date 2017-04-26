@@ -5,7 +5,6 @@ import multiprocessing as mp
 import signal
 import os
 import sys
-import psutil
 import json
 from functools import partial
 
